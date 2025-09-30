@@ -1,9 +1,9 @@
 services:
-  - type: worker                 # фоновый сервис (не web)
+  - type: worker                # фон. сервис, не web
     name: kufar-watcher-bot
     env: python
-    pythonVersion: 3.11.9        # ЖЁСТКО фиксируем Python
+    pythonVersion: 3.11.9       # жёстко фиксируем 3.11
     buildCommand: |
-      python -V                  # покажет версию в логах
+      python -V                 # в логах увидишь 3.11
       pip install -r requirements.txt
     startCommand: python kufar_bot.py
