@@ -1,0 +1,105 @@
+"""
+Kufar Watcher — скрипт для отслеживания новых объявлений на kufar.by
+и отправки их в Telegram.
+"""
+
+import os
+import re
+import time
+import sqlite3
+import requests
+import random
+import logging
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
+
+KUFAR_SEARCH_URLS = os.getenv(
+    "KUFAR_SEARCH_URLS",
+    "https://www.kufar.by/l/elektronika/elektrotransport?only_photo=1&sort=lst.d"
+)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+DB_PATH = "kufar_watcher.db"
+CHECK_INTERVAL = 60  # секунд между проверками
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS seen_ads (
+               id TEXT PRIMARY KEY,
+               url TEXT,
+               first_seen_ts INTEGER
+           )"""
+    )
+    conn.commit()
+    return conn
+
+def ad_id_from_url(href: str):
+    m = re.search(r"/vi/(\\d+)", href)
+    return m.group(1) if m else None
+
+def parse_ads(html: str, base_url: str):
+    soup = BeautifulSoup(html, "lxml")
+    anchors = soup.select('a[href*="/vi/"]')
+    ads = []
+    seen = set()
+    for a in anchors:
+        href = a.get("href")
+        if not href:
+            continue
+        full = urljoin(base_url, href)
+        adid = ad_id_from_url(full)
+        if not adid or adid in seen:
+            continue
+        seen.add(adid)
+        title = a.get("title") or a.get_text(" ", strip=True)
+        ads.append({"id": adid, "title": title, "url": full})
+    return ads
+
+def fetch(url: str):
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    return r.text
+
+def send_to_telegram(ad: dict):
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        logging.info("TELEGRAM_* не настроены, пропускаю отправку")
+        return
+    base = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    text = f"{ad['title']}\n{ad['url']}"
+    requests.post(
+        f"{base}/sendMessage",
+        json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+        timeout=20
+    )
+
+def main():
+    conn = init_db()
+    urls = [u.strip() for u in KUFAR_SEARCH_URLS.split(",") if u.strip()]
+    while True:
+        for url in urls:
+            logging.info("Проверяю %s", url)
+            try:
+                html = fetch(url)
+            except Exception as e:
+                logging.warning("Ошибка загрузки: %s", e)
+                continue
+            ads = parse_ads(html, url)
+            for ad in ads:
+                cur = conn.execute("SELECT 1 FROM seen_ads WHERE id=?", (ad["id"],))
+                if cur.fetchone():
+                    continue
+                conn.execute("INSERT INTO seen_ads (id, url, first_seen_ts) VALUES (?, ?, ?)",
+                             (ad["id"], ad["url"], int(time.time())))
+                conn.commit()
+                logging.info("Новое объявление: %s", ad["title"])
+                send_to_telegram(ad)
+                time.sleep(random.uniform(0.5, 1.5))
+        logging.info("Пауза %s секунд", CHECK_INTERVAL)
+        time.sleep(CHECK_INTERVAL)
+
+if __name__ == "__main__":
+    main()
+
